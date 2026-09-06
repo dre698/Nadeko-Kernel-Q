@@ -80,8 +80,6 @@ jobs:
 
       - name: Integrate ReSukiSU
         run: |
-          chmod u+x clean.sh
-          bash clean.sh
           curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
 
       - name: Get ReSukiSU version
