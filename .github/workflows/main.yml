@@ -1,0 +1,208 @@
+# Kernel Build (MTK mt6765) — NadekoSU (dre698/NadekoSU)
+# Semua varian: angelica, angelican, angelicain, cattail, dandelion
+#
+# Taruh file ini di: .github/workflows/build-nadeko.yml
+# di repo GitHub source dandelion kamu (yang sudah termasuk:
+#   - clean.sh & syscall_hook.sh punya kamu di root repo
+#   - patch LOCALVERSION -> "-Nadeko-MIUI-Q" di semua *_defconfig)
+
+name: Build Nadeko Kernel With NadekoSU
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Build 1 varian saja (kosongkan = build semua varian di matrix)"
+        required: false
+        default: ""
+
+env:
+  TZ: "Asia/Jakarta"
+  KERNEL_ARCH: "arm64"
+  KBUILD_BUILD_USER: "Telegram"
+  KBUILD_BUILD_HOST: "dre698"
+  BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+
+jobs:
+  build_and_package:
+    name: Build ${{ matrix.defconfig }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        defconfig:
+          - dandelion_defconfig
+          - angelica_defconfig
+          - angelican_defconfig
+          - cattail_defconfig
+          - angelicain_defconfig
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve defconfig
+        run: |
+          if [ -n "${{ github.event.inputs.defconfig }}" ]; then
+            echo "KERNEL_DEFCONFIG=${{ github.event.inputs.defconfig }}" >> $GITHUB_ENV
+          else
+            echo "KERNEL_DEFCONFIG=${{ matrix.defconfig }}" >> $GITHUB_ENV
+          fi
+
+      - name: Install dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev cpio kmod git zip curl ca-certificates jq \
+            wget libffi-dev zlib1g-dev libreadline-dev libsqlite3-dev libbz2-dev libncurses5-dev libgdbm-dev liblzma-dev tk-dev
+
+      - name: Configure git
+        run: |
+          git config --global http.sslVerify false
+          git config --global url."https://".insteadOf git://
+
+      - name: Clone crdroid Clang
+        run: |
+          git clone --depth=1 https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r428724.git /tmp/clang
+
+      - name: Clone LineageOS GCC toolchains
+        run: |
+          GIT_SSL_NO_VERIFY=1 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git /tmp/gcc-aarch64
+          GIT_SSL_NO_VERIFY=1 git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git /tmp/gcc-arm
+
+      - name: Verify toolchains
+        run: |
+          /tmp/clang/bin/clang --version
+          /tmp/gcc-aarch64/bin/aarch64-linux-android-gcc --version
+          /tmp/gcc-arm/bin/arm-linux-androideabi-gcc --version
+
+      - name: Integrate ReSukiSU
+        run: |
+          chmod u+x clean.sh
+          bash clean.sh
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+
+      - name: Get ReSukiSU version
+        run: |
+          NSU_GIT_VER=$(cd KernelSU && git rev-list --count HEAD 2>/dev/null || echo "0")
+          NSU_VER=$((30000 + NSU_GIT_VER + 700))
+          echo "NSU_VER=$NSU_VER" >> $GITHUB_ENV
+          echo "NadekoSU version: $NSU_VER"
+
+      - name: Build kernel
+        run: |
+          START_TIME=$(date +%s)
+          export PATH="/tmp/clang/bin:/tmp/gcc-aarch64/bin:/tmp/gcc-arm/bin:${PATH}"
+
+          export ARCH=${KERNEL_ARCH}
+          export CROSS_COMPILE="aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="arm-linux-androideabi-"
+          export CC="clang"
+          export CLANG_TRIPLE="aarch64-linux-gnu-"
+
+          make O=out ARCH=${ARCH} ${KERNEL_DEFCONFIG}
+
+          make -j$(nproc) \
+            O=out \
+            ARCH=${ARCH} \
+            CC=clang \
+            CLANG_TRIPLE=${CLANG_TRIPLE} \
+            CROSS_COMPILE=${CROSS_COMPILE} \
+            CROSS_COMPILE_ARM32=${CROSS_COMPILE_ARM32} \
+            2>&1 | tee build.log
+
+          echo "B_TIME=$(($(date +%s) - START_TIME))" >> $GITHUB_ENV
+
+      - name: Set artifact name
+        run: |
+          VARIANT=$(echo "${KERNEL_DEFCONFIG}" | sed 's/_defconfig$//')
+          ARTIFACT_NAME="Nadeko-${VARIANT}-rsu${NSU_VER}-$(date +%y%m%d)-$(date +%H%M)-${GITHUB_SHA:0:9}"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+
+      - name: Package AnyKernel3
+        run: |
+          git clone -b nadeko --depth=1 https://github.com/dre698/AnyKernel3.git anykernel
+          cd anykernel
+          rm -f zImage *.dtb Image* dtb*.img
+
+          if [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb Image.gz-dtb
+          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image.gz" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image.gz Image.gz
+          elif [ -f "../out/arch/${KERNEL_ARCH}/boot/Image" ]; then
+            cp ../out/arch/${KERNEL_ARCH}/boot/Image Image
+          else
+            echo "✗ No kernel image found!"
+            ls -lah ../out/arch/${KERNEL_ARCH}/boot/
+            exit 1
+          fi
+
+          cp ../out/arch/${KERNEL_ARCH}/boot/dtb*.img . 2>/dev/null || echo "No DTB files"
+
+          cat > anykernel.sh << 'EOF'
+          properties() { '
+          kernel.string=
+          do.devicecheck=1
+          device.name1=blossom
+          device.name2=dandelion
+          device.name3=angelica
+          device.name4=angelican
+          device.name5=cattail
+          device.name6=angelicain
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          '; }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+
+          . tools/ak3-core.sh;
+          dump_boot;
+          write_boot;
+          EOF
+
+          zip -r9 ../${ARTIFACT_NAME}.zip * -x .git README.md *placeholder
+
+          Z_MD5=$(md5sum ../${ARTIFACT_NAME}.zip | cut -d ' ' -f1)
+          echo "Z_MD5=$Z_MD5" >> $GITHUB_ENV
+
+      - name: Upload AnyKernel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}.zip
+          retention-days: 30
+
+      - name: Upload build log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log-${{ env.ARTIFACT_NAME }}
+          path: build.log
+          retention-days: 7
+
+      - name: Telegram notification
+        if: always() && env.BOT_TOKEN != ''
+        run: |
+          COMPILER_VER=$(/tmp/clang/bin/clang --version | head -1 | sed 's/ (.*//')
+          if [ "${{ job.status }}" == "success" ]; then
+            B_MIN=$((${{ env.B_TIME }} / 60))
+            B_SEC=$((${{ env.B_TIME }} % 60))
+            CAPTION=$(printf "%s build succeeded in %sm %ss\nmd5: \`%s\`\ncompiler: %s" "${{ env.ARTIFACT_NAME }}" "$B_MIN" "$B_SEC" "${{ env.Z_MD5 }}" "$COMPILER_VER")
+            curl -s -F chat_id="$GROUP_CHAT_ID" \
+              -F document=@${{ env.ARTIFACT_NAME }}.zip \
+              -F caption="$CAPTION" \
+              -F parse_mode=Markdown \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
+          else
+            curl -s -F chat_id="$GROUP_CHAT_ID" \
+              -F document=@build.log \
+              -F caption="${{ env.KERNEL_DEFCONFIG }} build failed. check log." \
+              "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
+          fi
+          
