@@ -9,6 +9,9 @@
 # - clean.sh / syscall_hook.sh yang mungkin kamu lihat di referensi lain TIDAK ada
 #   di source ini, jadi step itu dihapus (kalau memang punya script itu, tinggal
 #   tambahkan lagi stepnya).
+# - Runner dipakai ubuntu-20.04 (bukan 22.04): tools/dct/DrvGen.py (generator
+#   device-tree MediaTek) adalah skrip Python 2 lama, dan Ubuntu 22.04 sudah
+#   tidak menyediakan paket python2 sama sekali. 20.04 masih punya.
 
 name: Build Kernel
 
@@ -49,7 +52,7 @@ env:
 jobs:
   build:
     name: Build ${{ github.event.inputs.defconfig || 'dandelion_defconfig' }} (${{ github.event.inputs.root_solution || 'kernelsu' }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04
 
     steps:
       - name: Checkout kernel source
@@ -95,6 +98,21 @@ jobs:
             bc bison flex build-essential libssl-dev libelf-dev \
             cpio kmod git zip unzip curl ca-certificates \
             device-tree-compiler python3
+
+      - name: Install Python 2 (required by MediaTek DCT/DrvGen tools)
+        run: |
+          # tools/dct/DrvGen.py (generates the MTK device-tree cust.dtsi) is a
+          # legacy Python 2 script and shebangs #!/usr/bin/python. We install
+          # python2 from universe and put a `python` shim first on PATH.
+          sudo apt-get install -y --no-install-recommends python2
+          mkdir -p /tmp/py2shim
+          ln -sf "$(command -v python2)" /tmp/py2shim/python
+          echo "/tmp/py2shim" >> "$GITHUB_PATH"
+
+      - name: Verify python shim
+        run: |
+          python --version
+          python -c "print 'python2 ok'"
 
       - name: Cache toolchains
         id: cache-toolchain
@@ -247,4 +265,3 @@ jobs:
               -F caption="${KERNEL_DEFCONFIG} build failed — check log" \
               "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument"
           fi
-          
