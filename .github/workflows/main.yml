@@ -1,3 +1,4 @@
+
 # Build Xiaomi Kernel (dandelion / MT6765) — dengan KernelSU bawaan
 #
 # Taruh file ini di: .github/workflows/build-kernel.yml (di root repo GitHub kamu)
@@ -9,9 +10,13 @@
 # - clean.sh / syscall_hook.sh yang mungkin kamu lihat di referensi lain TIDAK ada
 #   di source ini, jadi step itu dihapus (kalau memang punya script itu, tinggal
 #   tambahkan lagi stepnya).
-# - Runner dipakai ubuntu-20.04 (bukan 22.04): tools/dct/DrvGen.py (generator
-#   device-tree MediaTek) adalah skrip Python 2 lama, dan Ubuntu 22.04 sudah
-#   tidak menyediakan paket python2 sama sekali. 20.04 masih punya.
+# - Runner pakai ubuntu-22.04. tools/dct/DrvGen.py (generator device-tree
+#   MediaTek) adalah skrip Python 2 lama. Ubuntu 20.04 (yang tadinya punya
+#   paket python2 lewat apt) SUDAH DIHAPUS TOTAL dari GitHub Actions sejak
+#   April 2025 — pakai runs-on: ubuntu-20.04 bikin job nyangkut "queued"
+#   selamanya karena runner-nya memang tidak pernah ada. Ubuntu 22.04/24.04
+#   juga sudah tidak menyediakan paket python2 dari apt, jadi Python 2.7.18
+#   di-compile dari source (di-cache biar run berikutnya cepat).
 
 name: Build Kernel
 
@@ -52,7 +57,7 @@ env:
 jobs:
   build:
     name: Build ${{ github.event.inputs.defconfig || 'dandelion_defconfig' }} (${{ github.event.inputs.root_solution || 'kernelsu' }})
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout kernel source
@@ -99,14 +104,35 @@ jobs:
             cpio kmod git zip unzip curl ca-certificates \
             device-tree-compiler python3
 
-      - name: Install Python 2 (required by MediaTek DCT/DrvGen tools)
+      - name: Cache Python 2.7 build
+        id: cache-python2
+        uses: actions/cache@v4
+        with:
+          path: /tmp/python2
+          key: python2.7.18-${{ runner.os }}-v1
+
+      - name: Build Python 2 from source (required by MediaTek DCT/DrvGen tools)
+        if: steps.cache-python2.outputs.cache-hit != 'true'
         run: |
           # tools/dct/DrvGen.py (generates the MTK device-tree cust.dtsi) is a
-          # legacy Python 2 script and shebangs #!/usr/bin/python. We install
-          # python2 from universe and put a `python` shim first on PATH.
-          sudo apt-get install -y --no-install-recommends python2
+          # legacy Python 2 script (shebang #!/usr/bin/python). Ubuntu 22.04+
+          # dropped the python2 apt package entirely, and ubuntu-20.04 is no
+          # longer available as a GitHub-hosted runner at all — so we build
+          # CPython 2.7.18 from source once and cache the result.
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev libbz2-dev libreadline-dev libsqlite3-dev \
+            libncurses5-dev libffi-dev liblzma-dev zlib1g-dev
+          curl -LSs -o /tmp/Python-2.7.18.tgz https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
+          tar xf /tmp/Python-2.7.18.tgz -C /tmp
+          cd /tmp/Python-2.7.18
+          ./configure --prefix=/tmp/python2 >/dev/null
+          make -j"$(nproc)" >/dev/null
+          make install >/dev/null
+
+      - name: Export python2 shim
+        run: |
           mkdir -p /tmp/py2shim
-          ln -sf "$(command -v python2)" /tmp/py2shim/python
+          ln -sf /tmp/python2/bin/python2.7 /tmp/py2shim/python
           echo "/tmp/py2shim" >> "$GITHUB_PATH"
 
       - name: Verify python shim
